@@ -61,7 +61,7 @@ pip install -r requirements.txt
 
 3.	Under OAuth2 → URL Generator, grant it the `bot` scope and the `Send Messages` permission, then visit the generated URL to invite it into your server.  
 
-### Run bot on a server on in a Cloud
+### Run bot on your server or on a Cloud platform
 * Locally with a cron job (e.g. run the script once a day), or
 * Hosted on Heroku / Railway / AWS Lambda / a VPS, where the bot runs 24/7 and sleeps between tasks.
 
