@@ -2,6 +2,8 @@
 
 A Python-based Discord bot that posts the [SpanishDict Word of the Day](https://www.spanishdict.com/wordoftheday) to a specified Discord channel or thread.
 
+![](./SpanishDictWOTD_example.png)
+
 ## Features
 
 - ✅ Scrapes the latest Word of the Day from SpanishDict
