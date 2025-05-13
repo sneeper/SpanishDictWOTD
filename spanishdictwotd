@@ -181,20 +181,22 @@ def main():
     --once/-o: send once and exit
     --channel-id/-c: Discord channel to post
     --thread-id/-t: Discord thread to post
-    --webhook-url/-w: Discord webhook URL to post (can also be set via DISCORD_WEBHOOK_URL env)
+    --webhook-url/-w: Discord webhook URL to post (or env DISCORD_WEBHOOK_URL)
+    --history-file/-f: Path to history file (default: sent_wotd.txt alongside script)
     --utc-time/-u: Daily send time (UTC)
     """
     parser = argparse.ArgumentParser(description="SpanishDict WOTD bot — daemon or one-shot")
     parser.add_argument("--once", "-o", action="store_true",
-                        help="Send WOTD once on startup and exit.")
+                        help="Send WOTD once and exit (no daemon)")
     group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument("--channel-id", "-c", type=int,
                        help="Discord channel ID to post into.")
     group.add_argument("--thread-id", "-t", type=int,
                        help="Discord thread ID to post into.")
     group.add_argument("--webhook-url", "-w",
-                       help="Discord webhook URL to post into."
-                       )
+                       help="Discord webhook URL to post into.")
+    parser.add_argument("--history-file", "-f", type=Path,
+                        help="Path to history file (default: sent_wotd.txt)")
     parser.add_argument("--utc-time", "-u", metavar="HH:MM",
                         help="Daily send time in UTC (e.g. 16:30)")
     args = parser.parse_args()
@@ -215,6 +217,9 @@ def main():
             "Must provide one of --channel-id, --thread-id, or set DISCORD_WEBHOOK_URL / --webhook-url"
         )
 
+    # Resolve history file path
+    history_file = args.history_file.resolve() if args.history_file else Path(__file__).parent / "sent_wotd.txt"
+
     # Schedule time
     if args.utc_time:
         h, m = map(int, args.utc_time.split(":", 1))
@@ -223,7 +228,6 @@ def main():
         schedule_time = time(9, 0, tzinfo=timezone.utc)  # default 1 AM PT
 
     token = load_token()
-    history_file = Path(__file__).parent / "sent_wotd.txt"
     os.environ['SSL_CERT_FILE'] = certifi.where()
 
     intents = discord.Intents.default()
