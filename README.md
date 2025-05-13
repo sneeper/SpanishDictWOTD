@@ -10,12 +10,22 @@ A Python-based Discord bot that posts the [SpanishDict Word of the Day](https://
 - 📆 Posts automatically once per day at a configurable UTC time (daemon)
 - 🧪 One-shot mode for running from cron instead
 - 💬 Sends to a channel or thread
+- 💬 Sends to a channel or thread via Bot token
+- 🔗 Sends via Discord Incoming Webhook (env or CLI)
 - 🔁 Prevents reposting the same word 
 
 
 ## Usage
 
-#### Example
+#### Example (webook mode + one time)
+
+```
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/123456/fooobar
+./spanishdictwotd --once
+```
+
+
+#### Example (bot mode)
 
 ```
 DISCORD_TOKEN=your_token_here 
@@ -24,17 +34,22 @@ DISCORD_TOKEN=your_token_here
 
 ### Options
 
-| Option                | Description                                                              |
-|-----------------------|--------------------------------------------------------------------------|
-| `--channel-id`        | Discord channel ID to post into                                          |
-| `--thread-id`         | Discord thread ID to post into (mutually exclusive with `--channel-id`)  |
-| `--utc-time HH:MM`    | Time to post in UTC (default is `09:00`, equivalent to 1AM PT)           |
-| `--once`, `-o`        | Send the WOTD once and exit (no daemon)                                              |
+
+| Option                | Short  | Description                                                     | Default                | Notes                                                           |
+|-----------------------|--------|-----------------------------------------------------------------|------------------------|-----------------------------------------------------------------|
+| `--once`              | `-o`   | Send the WOTD once and exit (no daemon)                         | `false`                | Omit for daemon mode                                            |
+| `--channel-id <ID>`   | `-c`   | Discord channel ID to post into                                 | _none_                 | Mutually exclusive with `--thread-id` & `--webhook-url`         |
+| `--thread-id <ID>`    | `-t`   | Discord thread ID to post into                                  | _none_                 | Mutually exclusive with `--channel-id` & `--webhook-url`        |
+| `--webhook-url <URL>` | `-w`   | Discord incoming webhook URL to post into                       | `$DISCORD_WEBHOOK_URL` | Mutually exclusive with `--channel-id` & `--thread-id`          |
+| `--utc-time <HH:MM>`  | `-u`   | Daily send time in UTC (e.g. `16:30`)                           | `09:00`                | Only applies in daemon mode                                    | 
+
+- Daemon (default): runs continuously and posts once per day at --utc-time.
+- One-shot (--once): posts immediately and exits.
 
 **NOTE**: The script writes to `sent_wotd.txt` in the same directoryto avoid sending duplicate words. The user running the script must have write access to the file (and the directory if the file does not exist to create it). 
 
 
-## Authentication
+## Authentication (bot mode)
 
 The bot looks for a Discord token in:
 
@@ -53,7 +68,42 @@ Install dependencies with:
 pip install -r requirements.txt
 ```
 
-## Bot Setup
+## Webhook Method 
+
+Use a Discord incoming webhook instead of a Bot token. 
+
+**1. Create your webhook**  
+   - In Discord, open Server Settings → Integrations → Webhooks → **New Webhook**.  
+   - Choose channel/thread, give it a name, then 
+
+**Copy Webhook URL**.
+
+**2. Enable in the bot**  
+   - **Env var**:  
+     ```bash
+     export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/…"
+     ```  
+   - **Or CLI flag**:  
+     ```bash
+     ./spanishdictwotd --webhook-url https://discord.com/api/webhooks/… [other flags]
+     ```
+
+**3. Choose one-shot vs. daemon**  
+   - `--once` (or cron): post immediately, then exit.  
+   - (default) no `--once`: run 24/7 and post at `--utc-time` (defaults to 09:00 UTC).
+
+**4. (Optional) Schedule time**  
+   ```bash
+   ./spanishdictwotd.py --webhook-url … --utc-time 16:30
+   ```
+   Posts daily at 16:30 UTC; omit `--once` for daemon.
+
+
+## Bot Method 
+
+Set 
+
+### Bot Setup 
 
 1.	Go to the [Discord Developer Portal](https://discord.com/developers/applications) and click New Application.
 

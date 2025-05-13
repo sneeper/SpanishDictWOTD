@@ -13,12 +13,10 @@ import logging
 
 from bs4 import BeautifulSoup
 from discord.ext import tasks
-from datetime import datetime, time, timezone
-from zoneinfo import ZoneInfo
+from datetime import time, timezone
 from pathlib import Path
 
 # ── LOGGING ───────────────────────────────────────────────────────────────────
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s'
@@ -27,30 +25,59 @@ logging.basicConfig(
 # ── FUNCTIONS ────────────────────────────────────────────────────────────────
 
 def load_token():
-    """Load the Discord bot token from an environment variable or a .token file."""
+    """
+    Load the Discord bot token from an environment variable or a .token file.
+    Priority:
+      1. DISCORD_TOKEN environment variable
+      2. .token file alongside script
+    Exits on failure.
+    """
     token = os.getenv("DISCORD_TOKEN")
     if token:
         return token.strip()
     try:
-        here = os.path.abspath(os.path.dirname(__file__))
-        with open(os.path.join(here, ".token"), "r") as f:
-            return f.read().strip()
+        here = Path(__file__).resolve().parent
+        return (here / ".token").read_text().strip()
     except FileNotFoundError:
         logging.error("❌ No DISCORD_TOKEN env var and no .token file found.")
         sys.exit(1)
 
+
 def load_history(history_file):
-    """Load a set of previously sent words from the history file."""
-    if not history_file.exists(): return set()
-    return {l.strip() for l in history_file.read_text().splitlines() if l}
+    """
+    Load a set of previously sent words from the history file.
+
+    Args:
+        history_file (Path): Path to the history file.
+
+    Returns:
+        set: A set of words already sent.
+    """
+    if not history_file.exists():
+        return set()
+    return {line.strip() for line in history_file.read_text().splitlines() if line.strip()}
+
 
 def save_word(word, history_file):
-    """Append a new word to the history file."""
+    """
+    Append a new word to the history file.
+
+    Args:
+        word (str): The word to append.
+        history_file (Path): Path to the history file.
+    """
     with history_file.open("a") as f:
         f.write(f"{word}\n")
 
+
 def fetch_wotd():
-    """Scrape the SpanishDict Word of the Day page and return a Discord embed and word."""
+    """
+    Scrape the SpanishDict Word of the Day page.
+
+    Returns:
+        tuple: (discord.Embed, str) Embed ready for Discord and the word.
+        If fetch or parse fails, returns (None, None).
+    """
     url = 'https://www.spanishdict.com/wordoftheday'
     logging.info(f"Fetching WOTD from: {url}")
     try:
@@ -61,29 +88,30 @@ def fetch_wotd():
         return None, None
 
     soup = BeautifulSoup(resp.text, 'html.parser')
-
     word_tag = soup.find('h3')
-    word = word_tag.get_text(strip=True) if word_tag else '—'
+    word = word_tag.get_text(strip=True) if word_tag else None
     def_tag = word_tag.find_next_sibling() if word_tag else None
-    definition = def_tag.get_text(strip=True) if def_tag else '—'
+    definition = def_tag.get_text(strip=True) if def_tag else None
 
     example = None
-    ex_header = soup.find(string=lambda t: 'EXAMPLES' in t.upper())
-    if ex_header:
-        ex_tag = ex_header.find_parent().find_next_sibling()
-        raw = ex_tag.get_text(strip=True) if ex_tag else ""
-        if '—' in raw:
-            spanish, english = map(str.strip, raw.split('—', 1))
-        else:
-            spanish, english = raw, ""
-        spanish = f"*{spanish.replace(word, f'**{word}**')}*"
-        english = english.replace(definition, f"**{definition}**")
-        example = f"{spanish}\n{english}"
+    if word and definition:
+        ex_header = soup.find(string=lambda t: 'EXAMPLES' in t.upper())
+        if ex_header:
+            ex_tag = ex_header.find_parent().find_next_sibling()
+            raw = ex_tag.get_text(strip=True) if ex_tag else ""
+            if '—' in raw:
+                lhs, rhs = raw.split('—', 1)
+                spanish, english = map(str.strip, (lhs, rhs))
+            else:
+                spanish, english = raw, ""
+            spanish = f"*{spanish.replace(word, f'**{word}**')}*"
+            english = english.replace(definition, f"**{definition}**")
+            example = f"{spanish}\n{english}"
 
     embed = discord.Embed(
-        title=f"\U0001F4D6 Word of the Day: **{word}**",
-        url=f"https://www.spanishdict.com/translate/{urllib.parse.quote(word)}",
-        description=f"*Definition:* {definition}"
+        title=f"\U0001F4D6 Word of the Day: **{word or '—'}**",
+        url=f"https://www.spanishdict.com/translate/{urllib.parse.quote(word)}" if word else None,
+        description=f"*Definition:* {definition or '—'}"
     )
     if example:
         embed.add_field(name="Example", value=example, inline=False)
@@ -91,7 +119,15 @@ def fetch_wotd():
     return embed, word
 
 async def do_send(client, target_id, target_type, history_file):
-    """Fetch the word of the day and send it to the configured Discord channel/thread."""
+    """
+    Fetch the WOTD and send it via the configured Discord target.
+
+    Args:
+        client (discord.Client): The Discord client instance.
+        target_id (str|int): Channel/thread ID or webhook URL.
+        target_type (str): 'channel', 'thread', or 'webhook'.
+        history_file (Path): Path to the history file.
+    """
     embed, word = fetch_wotd()
     if not word:
         return
@@ -100,55 +136,91 @@ async def do_send(client, target_id, target_type, history_file):
     if word in history:
         logging.info(f" → Skipped: {word!r} was already sent.")
         return
-    target = client.get_channel(target_id)
-    if not target:
+
+    if target_type == 'webhook':
+        payload = {"embeds": [embed.to_dict()]}
+        try:
+            await asyncio.to_thread(requests.post, target_id, json=payload)
+            logging.info(f" → Sent: {word!r} via webhook")
+            save_word(word, history_file)
+        except Exception as e:
+            logging.error(f" → ERROR sending via webhook: {e}")
+        return
+
+    channel = client.get_channel(int(target_id))
+    if not channel:
         logging.error(f" → ERROR: {target_type} {target_id} not found.")
         return
-    await target.send(embed=embed)
+    await channel.send(embed=embed)
     logging.info(f" → Sent: {word!r} to {target_type} {target_id}")
     save_word(word, history_file)
 
+
 def start_stdin_listener(client, target_id, target_type, history_file):
-    """Start a background thread to listen for the 'force' command on stdin."""
+    """
+    Start a background thread listening for the "force" command on stdin.
+
+    When "force" is entered, triggers an immediate send.
+    """
     def _stdin_loop():
         while True:
             try:
-                line = input().strip()
-                if line.lower() == "force":
-                    asyncio.run_coroutine_threadsafe(do_send(client, target_id, target_type, history_file), client.loop)
+                if input().strip().lower() == "force":
+                    asyncio.run_coroutine_threadsafe(
+                        do_send(client, target_id, target_type, history_file), client.loop
+                    )
             except EOFError:
                 break
-    t = threading.Thread(target=_stdin_loop, daemon=True)
-    t.start()
+    threading.Thread(target=_stdin_loop, daemon=True).start()
 
-# ── MAIN ───────────────────────────────────────────────────────────────
 
 def main():
-    """Main function to initialize configuration and run the bot."""
-    
+    """
+    Parse CLI args, set up Discord client, and start either one-shot or daemon mode.
 
-    parser = argparse.ArgumentParser(
-        description="SpanishDict WOTD bot — daemon or one-shot"
-    )
-    parser.add_argument("--once", "-o", action="store_true", help="Send WOTD once on startup.")
-    target = parser.add_mutually_exclusive_group(required=True)
-    target.add_argument("--channel-id", "-c", type=int, help="Discord channel ID to post into")
-    target.add_argument("--thread-id", "-t", type=int, help="Discord thread ID to post into")
-    parser.add_argument("--utc-time", "-u", metavar="HH:MM", help="Daily send time in UTC (e.g. 16:30)")
+    --once/-o: send once and exit
+    --channel-id/-c: Discord channel to post
+    --thread-id/-t: Discord thread to post
+    --webhook-url/-w: Discord webhook URL to post (can also be set via DISCORD_WEBHOOK_URL env)
+    --utc-time/-u: Daily send time (UTC)
+    """
+    parser = argparse.ArgumentParser(description="SpanishDict WOTD bot — daemon or one-shot")
+    parser.add_argument("--once", "-o", action="store_true",
+                        help="Send WOTD once on startup and exit.")
+    group = parser.add_mutually_exclusive_group(required=False)
+    group.add_argument("--channel-id", "-c", type=int,
+                       help="Discord channel ID to post into.")
+    group.add_argument("--thread-id", "-t", type=int,
+                       help="Discord thread ID to post into.")
+    group.add_argument("--webhook-url", "-w",
+                       help="Discord webhook URL to post into."
+                       )
+    parser.add_argument("--utc-time", "-u", metavar="HH:MM",
+                        help="Daily send time in UTC (e.g. 16:30)")
     args = parser.parse_args()
 
-    if args.channel_id:
+    # Determine posting target
+    webhook_url = args.webhook_url or os.getenv("DISCORD_WEBHOOK_URL")
+    if webhook_url:
+        target_type = 'webhook'
+        target_id = webhook_url
+    elif args.channel_id:
+        target_type = 'channel'
         target_id = args.channel_id
-        target_type = "channel"
-    else:
+    elif args.thread_id:
+        target_type = 'thread'
         target_id = args.thread_id
-        target_type = "thread"
+    else:
+        parser.error(
+            "Must provide one of --channel-id, --thread-id, or set DISCORD_WEBHOOK_URL / --webhook-url"
+        )
 
+    # Schedule time
     if args.utc_time:
         h, m = map(int, args.utc_time.split(":", 1))
         schedule_time = time(h, m, tzinfo=timezone.utc)
     else:
-        schedule_time = time(9, 0, tzinfo=timezone.utc)  # 1 AM PT
+        schedule_time = time(9, 0, tzinfo=timezone.utc)  # default 1 AM PT
 
     token = load_token()
     history_file = Path(__file__).parent / "sent_wotd.txt"
@@ -159,12 +231,7 @@ def main():
 
     @client.event
     async def on_ready():
-        """Event handler for when the bot successfully logs in."""
         logging.info(f"Logged in as {client.user} (ID: {client.user.id})")
-        for guild in client.guilds:
-            logging.info(f"Server: {guild.name} (ID: {guild.id})")
-            for channel in guild.text_channels:
-                logging.info(f"  #{channel.name}: {channel.id}")
         if args.once:
             logging.info("One-shot mode. Sending now and exiting.")
             await do_send(client, target_id, target_type, history_file)
@@ -177,12 +244,10 @@ def main():
 
     @tasks.loop(time=schedule_time)
     async def daily_wotd():
-        """Scheduled task to send the WOTD daily."""
         await do_send(client, target_id, target_type, history_file)
 
     client.run(token)
 
+
 if __name__ == "__main__":
     main()
-  
-
