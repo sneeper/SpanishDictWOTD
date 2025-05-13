@@ -42,6 +42,7 @@ DISCORD_TOKEN=your_token_here
 | `--thread-id <ID>`    | `-t`   | Discord thread ID to post into                                  | _none_                 | Mutually exclusive with `--channel-id` & `--webhook-url`        |
 | `--webhook-url <URL>` | `-w`   | Discord incoming webhook URL to post into                       | `$DISCORD_WEBHOOK_URL` | Mutually exclusive with `--channel-id` & `--thread-id`          |
 | `--utc-time <HH:MM>`  | `-u`   | Daily send time in UTC (e.g. `16:30`)                           | `09:00`                | Only applies in daemon mode                                    | 
+| `--history-file <PATH>` | `-f`   | Path to the history file                                 | `sent_wotd.txt`         | Override default; allows separate histories per target |
 
 - Daemon (default): runs continuously and posts once per day at --utc-time.
 - One-shot (--once): posts immediately and exits.
