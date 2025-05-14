@@ -10,6 +10,7 @@ import asyncio
 import argparse
 import urllib.parse
 import logging
+import re
 
 from bs4 import BeautifulSoup
 from discord.ext import tasks
@@ -90,8 +91,17 @@ def fetch_wotd():
     soup = BeautifulSoup(resp.text, 'html.parser')
     word_tag = soup.find('h3')
     word = word_tag.get_text(strip=True) if word_tag else None
+    # strip any leading Spanish article for matching in examples:
+    # (el, la, los, las, un, una, unos, unas)
+    article_es = r'^(?:el|la|los|las|un|una|unos|unas)\s+'
+    core_word = re.sub(article_es, '', word, flags=re.IGNORECASE) if word else None
+
     def_tag = word_tag.find_next_sibling() if word_tag else None
     definition = def_tag.get_text(strip=True) if def_tag else None
+    # strip any leading English article for matching in examples:
+    # (the, a, an)
+    article_en = r'^(?:the|a|an)\s+'
+    core_def = re.sub(article_en, '', definition, flags=re.IGNORECASE) if definition else None
 
     example = None
     if word and definition:
@@ -104,8 +114,10 @@ def fetch_wotd():
                 spanish, english = map(str.strip, (lhs, rhs))
             else:
                 spanish, english = raw, ""
-            spanish = f"*{spanish.replace(word, f'**{word}**')}*"
-            english = english.replace(definition, f"**{definition}**")
+
+           # bold on the stripped forms so 'sabiduría' matches inside 'la sabiduría'
+            spanish = f"*{spanish.replace(core_word, f'**{core_word}**')}*"
+            english = english.replace(core_def, f"**{core_def}**")
             example = f"{spanish}\n{english}"
 
     embed = discord.Embed(
