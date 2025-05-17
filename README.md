@@ -1,6 +1,10 @@
-# 📚 Word of the Day Poster
+# 📖 SpanishDict WOTD Discord Bot
+
 
 A lightweight Python script that fetches the **Word of the Day** from [SpanishDict](https://www.spanishdict.com/wordoftheday) or [FrenchDictionary](https://frenchdictionary.com/wordoftheday) and posts it to a Discord channel via a **webhook**.
+
+![](./SpanishDictWOTD_example.png)
+
 
 ## 🔧 Features
 
