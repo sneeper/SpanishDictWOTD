@@ -1,0 +1,155 @@
+#!/opt/homebrew/bin/python3
+
+import os
+import sys
+import certifi
+import requests
+import argparse
+import urllib.parse
+import logging
+import re
+
+from bs4 import BeautifulSoup
+from pathlib import Path
+
+"""
+This script fetches the Word of the Day (WOTD) from either SpanishDict or FrenchDictionary
+and posts it to a Discord webhook URL.
+
+Features:
+- Supports both Spanish and French
+- Uses Discord webhook only (no bot login)
+- Avoids reposting already-sent words (via history tracking)
+- Suitable for use via cron or CLI call
+"""
+
+SITES = {
+    'spanish': {
+        'wotdurl':  'https://www.spanishdict.com/wordoftheday',
+        'translate_url':  'https://www.spanishdict.com/translate',
+        'article_rex' : r'^(?:el|la|los|las|un|una|unos|unas)\s+',
+        'word_selector' : 'h3',
+    },
+    'french': {
+        'wotdurl':  'https://frenchdictionary.com/wordoftheday',
+        'translate_url':  'https://frenchdictionary.com/translate',
+        'article_rex' : r"^(?:(?:de l'|de la|du|des|l'|le|la|les|un|une))\s+",
+        'word_selector' : 'h3',
+    }
+}
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
+
+def load_history(history_file):
+    if not history_file.exists():
+        return set()
+    return {line.strip() for line in history_file.read_text(encoding="utf-8").splitlines() if line.strip()}
+
+def save_word(word, history_file):
+    with history_file.open("a", encoding="utf-8") as f:
+        f.write(f"{word}\n")
+
+def fetch_wotd(lang):
+    cfg = SITES[lang]
+    logging.info(f"Fetching WOTD from: {cfg['wotdurl']}")
+    try:
+        resp = requests.get(cfg['wotdurl'])
+        resp.raise_for_status()
+    except Exception as e:
+        logging.error(f"Error fetching WOTD: {e}")
+        return None, None
+
+    from discord import Embed
+
+    soup = BeautifulSoup(resp.text, 'html.parser')
+    word_tag = soup.find(cfg['word_selector'])
+    if not word_tag:
+        logging.warning("⚠️ Could not find the word tag in page.")
+        return None, None
+
+    word = word_tag.get_text(strip=True)
+    core_word = re.sub(cfg['article_rex'], '', word, flags=re.IGNORECASE)
+
+    def_tag = word_tag.find_next_sibling()
+    if not def_tag:
+        logging.warning("⚠️ No definition found.")
+        return None, None
+    definition = def_tag.get_text(strip=True)
+    article_en = r'^(?:the|a|an)\s+'
+    core_def = re.sub(article_en, '', definition, flags=re.IGNORECASE)
+
+    # Try to find a link for the word on the WOTD page
+    word_url = None
+    anchor = word_tag.find('a')
+    if anchor and anchor.has_attr('href'):
+        word_url = urllib.parse.urljoin(cfg['wotdurl'], anchor['href'])
+    else:
+        word_url = f"{cfg['translate_url']}/{urllib.parse.quote(word)}"
+
+    example = None
+    ex_header = soup.find(string=lambda t: 'EXAMPLES' in t.upper())
+    if ex_header:
+        ex_tag = ex_header.find_parent().find_next_sibling()
+        raw = ex_tag.get_text(strip=True) if ex_tag else ""
+        if '—' in raw:
+            lhs, rhs = raw.split('—', 1)
+            targetlang, english = map(str.strip, (lhs, rhs))
+        else:
+            targetlang, english = raw, ""
+        targetlang = f"*{targetlang.replace(core_word, f'**{core_word}**')}*"
+        english = english.replace(core_def, f"**{core_def}**")
+        example = f"{targetlang}\n{english}"
+
+    embed = Embed(
+        title=f"\U0001F4D6 Word of the Day: **{word or '—'}**",
+        url=word_url,
+        description=f"*Definition:* {definition or '—'}"
+    )
+    if example:
+        embed.add_field(name="Example", value=example, inline=False)
+
+    return embed.to_dict(), core_word
+
+def main():
+    parser = argparse.ArgumentParser(description="Post Word of the Day to a Discord webhook")
+    parser.add_argument("--webhook-url", "-w", default=os.getenv("DISCORD_WEBHOOK"),
+                        help="Discord webhook URL to post into (or set DISCORD_WEBHOOK env variable).")
+    parser.add_argument("--lang", "-l", choices=SITES.keys(), default='spanish', help="Which WOTD to fetch: spanish or french")
+    parser.add_argument("--history-file", "-f", type=Path, help="Path to history file (default: sent_wotd.txt)")
+    parser.add_argument("--dry-run", action="store_true", help="Fetch and print the WOTD instead of posting")
+    args = parser.parse_args()
+
+    if not args.webhook_url:
+        parser.error("Webhook URL not provided. Use --webhook-url or set DISCORD_WEBHOOK env var.")
+
+    history_file = args.history_file.resolve() if args.history_file else Path(__file__).parent / "sent_wotd.txt"
+    embed, word = fetch_wotd(args.lang)
+    if not word:
+        return
+    history = load_history(history_file)
+    if word in history:
+        logging.info(f" → Skipped: {word!r} was already sent.")
+        return
+
+    if args.dry_run:
+        print(embed)
+        return
+
+    if not args.webhook_url.startswith("https://discord.com/api/webhooks/"):
+        logging.warning("⚠️ Webhook URL may be malformed.")
+
+    try:
+        resp = requests.post(args.webhook_url, json={"embeds": [embed]})
+        resp.raise_for_status()
+        logging.info(f" → Sent: {word!r} via webhook")
+        save_word(word, history_file)
+    except Exception as e:
+        logging.error(f" → ERROR sending via webhook: {e}")
+
+if __name__ == "__main__":
+    os.environ['SSL_CERT_FILE'] = certifi.where()
+    main()
+
