@@ -1,6 +1,10 @@
 #!/opt/homebrew/bin/python3
 """
-Fetches the Word of the Day (WOTD) from SpanishDict or FrenchDictionary
+Fetches the Word of the Day (WOTD) from:
+Spanish - https://www.spanishdict.com/wordoftheday
+French  -  https://www.frenchdictionary.com/wordoftheday
+others  - https://www.innovativelanguage.com/word-of-the-day/
+
 and posts it to a Discord webhook URL.
 
 Features:
