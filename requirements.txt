@@ -2,3 +2,4 @@ beautifulsoup4
 certifi
 discord.py
 requests
+selenium

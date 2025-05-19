@@ -1,155 +1,432 @@
 #!/opt/homebrew/bin/python3
-
-import os
-import sys
-import certifi
-import requests
-import argparse
-import urllib.parse
-import logging
-import re
-
-from bs4 import BeautifulSoup
-from pathlib import Path
-
 """
-This script fetches the Word of the Day (WOTD) from either SpanishDict or FrenchDictionary
+Fetches the Word of the Day (WOTD) from SpanishDict or FrenchDictionary
 and posts it to a Discord webhook URL.
 
 Features:
-- Supports both Spanish and French
+- Supports Spanish and French via CURIOSITY_SITES
+- Supports other languages via innovativeLanguage
 - Uses Discord webhook only (no bot login)
 - Avoids reposting already-sent words (via history tracking)
 - Suitable for use via cron or CLI call
 """
+import os
+import logging
+import argparse
+import urllib.parse
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import List, Optional
 
-SITES = {
+import certifi
+import requests
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+# --- Data models ---
+@dataclass
+class Example:
+    sentence: str
+    translation: str
+    pinyin: Optional[str] = None
+    romanization: Optional[str] = None
+    kana: Optional[str] = None
+    romaji: Optional[str] = None
+    traditional: Optional[str] = None
+
+@dataclass
+class WOTD:
+    word: str
+    translation: str
+    url: str
+    examples: List[Example] = field(default_factory=list)
+    core_word: Optional[str] = None
+    core_translation: Optional[str] = None
+    use_romanization: bool = False
+    bold_core_word: bool = True
+    pinyin: Optional[str] = None
+    romanization: Optional[str] = None
+    kana: Optional[str] = None
+    romaji: Optional[str] = None
+    traditional: Optional[str] = None
+
+# --- Configuration ---
+CURIOSITY_SITES = {
     'spanish': {
-        'wotdurl':  'https://www.spanishdict.com/wordoftheday',
-        'translate_url':  'https://www.spanishdict.com/translate',
-        'article_rex' : r'^(?:el|la|los|las|un|una|unos|unas)\s+',
-        'word_selector' : 'h3',
+        'wotdurl': 'https://www.spanishdict.com/wordoftheday',
+        'translate_url': 'https://www.spanishdict.com/translate',
+        'article_rex': r'^(?:el|la|los|las|un|una|unos|unas)\s+',
+        'word_selector': 'h3',
     },
     'french': {
-        'wotdurl':  'https://frenchdictionary.com/wordoftheday',
-        'translate_url':  'https://frenchdictionary.com/translate',
-        'article_rex' : r"^(?:(?:de l'|de la|du|des|l'|le|la|les|un|une))\s+",
-        'word_selector' : 'h3',
+        'wotdurl': 'https://frenchdictionary.com/wordoftheday',
+        'translate_url': 'https://frenchdictionary.com/translate',
+        'article_rex': r"^(?:(?:de l'|de la|du|des|l'|le|la|les|un|une))\s+",
+        'word_selector': 'h3',
     }
 }
+SUPPORTED_LANGUAGES = sorted([
+    "afrikaans", "arabic", "bulgarian", "cantonese", "chinese", "croatian", "czech",
+    "danish", "dutch", "filipino", "finnish", "french", "german", "greek", "hebrew",
+    "hindi", "hungarian", "indonesian", "italian", "japanese", "korean", "malaysian",
+    "mongolian", "nepali", "norwegian", "persian", "polish", "portuguese", "romanian",
+    "russian", "serbian", "spanish", "swahili", "swedish", "thai", "turkish", "ukrainian",
+    "urdu", "vietnamese"
+])
 
+# --- Logging setup ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s'
 )
 
-def load_history(history_file):
+# --- History persistence ---
+def load_history(history_file: Path) -> set:
     if not history_file.exists():
         return set()
     return {line.strip() for line in history_file.read_text(encoding="utf-8").splitlines() if line.strip()}
 
-def save_word(word, history_file):
+
+def save_word(word: str, history_file: Path) -> None:
+    history_file.parent.mkdir(parents=True, exist_ok=True)
     with history_file.open("a", encoding="utf-8") as f:
         f.write(f"{word}\n")
 
-def fetch_wotd(lang):
-    cfg = SITES[lang]
+# --- Fetch & parse CURIOSITY sites ---
+def fetch_wotd_curiosity(lang: str) -> Optional[WOTD]:
+    cfg = CURIOSITY_SITES[lang]
     logging.info(f"Fetching WOTD from: {cfg['wotdurl']}")
     try:
-        resp = requests.get(cfg['wotdurl'])
+        resp = requests.get(cfg['wotdurl'], timeout=10)
         resp.raise_for_status()
     except Exception as e:
         logging.error(f"Error fetching WOTD: {e}")
-        return None, None
-
-    from discord import Embed
+        return None
 
     soup = BeautifulSoup(resp.text, 'html.parser')
     word_tag = soup.find(cfg['word_selector'])
     if not word_tag:
-        logging.warning("⚠️ Could not find the word tag in page.")
-        return None, None
+        logging.warning("Could not find word element")
+        return None
 
     word = word_tag.get_text(strip=True)
     core_word = re.sub(cfg['article_rex'], '', word, flags=re.IGNORECASE)
 
     def_tag = word_tag.find_next_sibling()
-    if not def_tag:
-        logging.warning("⚠️ No definition found.")
-        return None, None
-    definition = def_tag.get_text(strip=True)
-    article_en = r'^(?:the|a|an)\s+'
-    core_def = re.sub(article_en, '', definition, flags=re.IGNORECASE)
+    definition = def_tag.get_text(strip=True) if def_tag else ''
+    core_def = re.sub(r'^(?:the|a|an)\s+', '', definition, flags=re.IGNORECASE)
 
-    # Try to find a link for the word on the WOTD page
-    word_url = None
     anchor = word_tag.find('a')
     if anchor and anchor.has_attr('href'):
         word_url = urllib.parse.urljoin(cfg['wotdurl'], anchor['href'])
     else:
         word_url = f"{cfg['translate_url']}/{urllib.parse.quote(word)}"
 
-    example = None
+    examples = []
     ex_header = soup.find(string=lambda t: 'EXAMPLES' in t.upper())
     if ex_header:
         ex_tag = ex_header.find_parent().find_next_sibling()
-        raw = ex_tag.get_text(strip=True) if ex_tag else ""
+        raw = ex_tag.get_text(strip=True) if ex_tag else ''
         if '—' in raw:
             lhs, rhs = raw.split('—', 1)
-            targetlang, english = map(str.strip, (lhs, rhs))
+            target, eng = map(str.strip, (lhs, rhs))
         else:
-            targetlang, english = raw, ""
-        targetlang = f"*{targetlang.replace(core_word, f'**{core_word}**')}*"
-        english = english.replace(core_def, f"**{core_def}**")
-        example = f"{targetlang}\n{english}"
+            target, eng = raw, ''
+        examples.append(Example(sentence=target, translation=eng))
+
+    return WOTD(
+        word=word,
+        translation=definition,
+        url=word_url,
+        examples=examples,
+        core_word=core_word,
+        core_translation=core_def,
+        use_romanization=False
+    )
+
+# --- InnovativeLanguage widget fetch ---
+def _fetch_widget_html(language: str, wait_secs: int) -> str:
+    url = (
+        "https://www.innovativelanguage.com/widgets/wotd/embed.php"
+        f"?language={language.capitalize()}&type=large&bg=%23FFFFFF&content=%23000"
+        "&header=%23EB2A2E&highlight=%23F9F9FA&opacity=1&scrollbg=%2300CAED"
+        "&sound=%2300ACED&text=%2300ACED&quiz=N"
+    )
+    logging.debug(f"Fetching widget: {url}")
+    opts = Options()
+    opts.add_argument("--headless")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--window-size=1920,1080")
+    driver = webdriver.Chrome(options=opts)
+    try:
+        driver.get(url)
+        WebDriverWait(driver, wait_secs).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR,
+                ".wotd-widget-container-up .wotd-widget-sentence-main-space-text"))
+        )
+        return driver.page_source
+    except Exception as e:
+        logging.error(f"Widget load timeout: {e}")
+        return ''
+    finally:
+        driver.quit()
+
+# --- Parser implementations ---
+def _parse_generic(html: str) -> WOTD:
+    soup = BeautifulSoup(html, "html.parser")
+    word_el = soup.select_one(
+        ".wotd-widget-container-up .wotd-widget-sentence-main-space-text"
+    )
+    trans_el = soup.select_one(
+        ".wotd-widget-container-up .wotd-widget-sentence-quizmode-space .big.english"
+    )
+    if not word_el or not trans_el:
+        raise RuntimeError("Missing generic widget elements")
+    word = word_el.get_text(strip=True)
+    translation = trans_el.get_text(strip=True)
+    examples = []
+    sents = soup.select(
+        ".wotd-widget-container-down .wotd-widget-sentence-down-space-text"
+    )
+    transs = soup.select(
+        ".wotd-widget-container-down .wotd-widget-sentence-quizmode-space .big.english"
+    )
+    for se, te in zip(sents, transs):
+        rom_el = te.find_previous_sibling(
+            "div",
+            class_="wotd-widget-sentence-quizmode-space-text big romanization"
+        )
+        examples.append(Example(
+            sentence=se.get_text(strip=True),
+            translation=te.get_text(strip=True),
+            romanization=(rom_el.get_text(strip=True) if rom_el else None)
+        ))
+    return WOTD(word=word, translation=translation, url='', examples=examples)
+
+def _parse_japanese(html: str) -> WOTD:
+    soup = BeautifulSoup(html, "html.parser")
+    word_el = soup.select_one(
+        ".wotd-widget-container-up .wotd-widget-sentence-main-space-text"
+    )
+    kana_el = soup.select_one(
+        ".wotd-widget-container-up .wotd-widget-sentence-quizmode-space-text.kana"
+    )
+    romaji_el = soup.select_one(
+        ".wotd-widget-container-up .wotd-widget-sentence-quizmode-space-text.romaji"
+    )
+    trans_el = soup.select_one(
+        ".wotd-widget-container-up .wotd-widget-sentence-quizmode-space .big.english"
+    )
+    if not word_el or not trans_el:
+        raise RuntimeError("Missing Japanese widget elements")
+    word = word_el.get_text(strip=True)
+    kana = kana_el.get_text(strip=True) if kana_el else None
+    romaji = romaji_el.get_text(strip=True) if romaji_el else None
+    translation = trans_el.get_text(strip=True)
+    examples = []
+    blocks = soup.select(
+        ".wotd-widget-container-down-inner > div.wotd-widget-sentence-down-space"
+    )
+    for block in blocks:
+        sent = block.select_one(
+            ".wotd-widget-sentence-down-space-text .wotd-widget-sentence-main-space-text"
+        ).get_text(strip=True)
+        sibling = block.find_next_sibling("div")
+        kana_ex = sibling.select_one(
+            ".wotd-widget-sentence-quizmode-space-text.kana"
+        ) if sibling else None
+        romaji_ex = sibling.select_one(
+            ".wotd-widget-sentence-quizmode-space-text.romaji"
+        ) if sibling else None
+        trans_ex = sibling.select_one(".big.english") if sibling else None
+        examples.append(Example(
+            sentence=sent,
+            translation=(trans_ex.get_text(strip=True) if trans_ex else ''),
+            kana=(kana_ex.get_text(strip=True) if kana_ex else None),
+            romaji=(romaji_ex.get_text(strip=True) if romaji_ex else None)
+        ))
+
+    return WOTD(
+        word=word, translation=translation, url='',
+        examples=examples, kana=kana, romaji=romaji
+    )
+
+def _parse_chinese(html: str) -> WOTD:
+    soup = BeautifulSoup(html, "html.parser")
+    word_el = soup.select_one(
+        ".wotd-widget-container-up .wotd-widget-sentence-main-space-text"
+    )
+    translation_el = soup.select_one(
+        ".wotd-widget-container-up .wotd-widget-sentence-quizmode-space-text.big.english"
+    )
+    pinyin_el = soup.select_one(
+        ".wotd-widget-container-up .wotd-widget-sentence-quizmode-space-text.romanization"
+    )
+    traditional_el = soup.select_one(
+        ".wotd-widget-container-up .wotd-widget-sentence-quizmode-space-text.traditional"
+    )
+    if not word_el or not translation_el:
+        raise RuntimeError("Missing Chinese widget elements")
+    word = word_el.get_text(strip=True)
+    translation = translation_el.get_text(strip=True)
+    pinyin = pinyin_el.get_text(strip=True) if pinyin_el else None
+    traditional = traditional_el.get_text(strip=True) if traditional_el else None
+
+    examples = []
+    blocks = soup.select(
+        ".wotd-widget-container-down-inner > div.wotd-widget-sentence-down-space"
+    )
+    for block in blocks:
+        sentence = block.select_one(
+            ".wotd-widget-sentence-down-space-text .wotd-widget-sentence-main-space-text"
+        ).get_text(strip=True)
+        sibling = block.find_next_sibling("div")
+        pinyin_ex = sibling.select_one(
+            ".wotd-widget-sentence-quizmode-space-text.romanization"
+        ) if sibling else None
+        trad_ex = sibling.select_one(
+            ".wotd-widget-sentence-quizmode-space-text.traditional"
+        ) if sibling else None
+        trans_ex = sibling.select_one(".big.english") if sibling else None
+        examples.append(Example(
+            sentence=sentence,
+            translation=(trans_ex.get_text(strip=True) if trans_ex else ''),
+            pinyin=(pinyin_ex.get_text(strip=True) if pinyin_ex else None),
+            traditional=(trad_ex.get_text(strip=True) if trad_ex else None)
+        ))
+
+    return WOTD(
+        word=word, translation=translation, url='',
+        examples=examples, pinyin=pinyin, traditional=traditional
+    )
+
+def fetch_wotd_innovative(language: str, wait_secs: int = 10) -> Optional[WOTD]:
+    html = _fetch_widget_html(language, wait_secs)
+    if not html:
+        return None
+    lang = language.lower()
+    try:
+        if lang == 'japanese':
+            w = _parse_japanese(html)
+        elif lang == 'chinese':
+            w = _parse_chinese(html)
+        else:
+            w = _parse_generic(html)
+    except Exception as e:
+        logging.error(f"Parsing widget failed: {e}")
+        return None
+
+    w.use_romanization = lang in ['cantonese', 'korean', 'thai']
+    w.bold_core_word = lang not in ['cantonese', 'chinese' ]
+    w.url = f"https://www.innovativelanguage.com/word-of-the-day/{language}"
+    return w
+
+def embed_discord(w: WOTD) -> dict:
+    from discord import Embed
+
+    title_word = w.word
+    if w.pinyin:
+        if w.traditional and not (w.traditional == w.word):
+            title_word += f"({w.traditional} - {w.pinyin})"
+        else:
+            title_word += f" ({w.pinyin})"
+    elif w.kana:
+        title_word += f" ({w.kana} - {w.romaji})"
+    elif w.use_romanization and w.romanization:
+        title_word += f" ({w.romanization})"
 
     embed = Embed(
-        title=f"\U0001F4D6 Word of the Day: **{word or '—'}**",
-        url=word_url,
-        description=f"*Definition:* {definition or '—'}"
+        title=f"📖 Word of the Day: {title_word}",
+        url=w.url,
+        description=f"*Translation:* {w.translation or '—'}"
     )
-    if example:
-        embed.add_field(name="Example", value=example, inline=False)
-
-    return embed.to_dict(), core_word
+    if w.examples:
+        ex = w.examples[0]
+        key = w.core_word or w.word
+        if w.bold_core_word:
+            sent = ex.sentence.replace(key, f"**{key}**")
+        else:
+            sent = ex.sentence
+        trans = ex.translation.replace(w.core_translation or w.translation, f"**{w.core_translation or w.translation}**")
+        field = sent + "\n"
+        for attr in ['kana', 'romaji', 'traditional', 'pinyin', 'romanization']:
+            if attr == 'romanization' and not w.use_romanization:
+                continue
+            if attr == 'kana' and (ex.kana == ex.sentence):
+                continue
+            if attr == 'traditional' and (ex.traditional == ex.sentence):
+                continue
+            val = getattr(ex, attr)
+            if val:
+                field += val + "\n"
+        field += trans
+        embed.add_field(name="Example", value=field, inline=False)
+    return embed.to_dict()
 
 def main():
-    parser = argparse.ArgumentParser(description="Post Word of the Day to a Discord webhook")
-    parser.add_argument("--webhook-url", "-w", default=os.getenv("DISCORD_WEBHOOK"),
-                        help="Discord webhook URL to post into (or set DISCORD_WEBHOOK env variable).")
-    parser.add_argument("--lang", "-l", choices=SITES.keys(), default='spanish', help="Which WOTD to fetch: spanish or french")
-    parser.add_argument("--history-file", "-f", type=Path, help="Path to history file (default: sent_wotd.txt)")
-    parser.add_argument("--dry-run", action="store_true", help="Fetch and print the WOTD instead of posting")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--webhook-url", "-w",
+                        default=os.getenv("DISCORD_WEBHOOK"),
+                        help="Discord webhook URL or set DISCORD_WEBHOOK env var")
+    parser.add_argument("--lang", "-l", choices=SUPPORTED_LANGUAGES,
+                        default='spanish', help="Language for WOTD")
+    parser.add_argument("--history-file", "-f", type=Path,
+                        help="Path to history file")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Fetch and print without posting")
+    parser.add_argument("--debug", action="store_true",
+                        help="Enable debug logging")
     args = parser.parse_args()
 
-    if not args.webhook_url:
-        parser.error("Webhook URL not provided. Use --webhook-url or set DISCORD_WEBHOOK env var.")
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
 
-    history_file = args.history_file.resolve() if args.history_file else Path(__file__).parent / "sent_wotd.txt"
-    embed, word = fetch_wotd(args.lang)
-    if not word:
+    if not args.webhook_url:
+        parser.error("Webhook URL not provided")
+
+    history_file = args.history_file if args.history_file else Path(__file__).parent / "sent_wotd.txt"
+
+    try:
+        if args.lang in CURIOSITY_SITES:
+            w = fetch_wotd_curiosity(args.lang)
+        else:
+            w = fetch_wotd_innovative(args.lang)
+        if not w:
+            logging.error("Failed to fetch WOTD")
+            return
+    except Exception as e:
+        logging.error(f"Error: {e}")
         return
+
+    sent_key = w.core_word or w.word
     history = load_history(history_file)
-    if word in history:
-        logging.info(f" → Skipped: {word!r} was already sent.")
+    if sent_key in history:
+        logging.info(f"Skipped {sent_key}")
         return
 
     if args.dry_run:
-        print(embed)
+        logging.info(f"DRY RUN: {w}")
         return
 
     if not args.webhook_url.startswith("https://discord.com/api/webhooks/"):
-        logging.warning("⚠️ Webhook URL may be malformed.")
-
+        logging.warning("Webhook URL may be malformed")
     try:
-        resp = requests.post(args.webhook_url, json={"embeds": [embed]})
+        resp = requests.post(args.webhook_url,
+                             json={"embeds": [embed_discord(w)]},
+                             timeout=10)
         resp.raise_for_status()
-        logging.info(f" → Sent: {word!r} via webhook")
-        save_word(word, history_file)
+        logging.info(f"Sent: {sent_key}")
+        save_word(sent_key, history_file)
     except Exception as e:
-        logging.error(f" → ERROR sending via webhook: {e}")
+        logging.error(f"Error posting: {e}")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     os.environ['SSL_CERT_FILE'] = certifi.where()
     main()
 

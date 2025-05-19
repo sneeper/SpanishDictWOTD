@@ -8,7 +8,9 @@ A lightweight Python script that fetches the **Word of the Day** from [SpanishDi
 
 ## 🔧 Features
 
-- ✅ Supports both Spanish and French word feeds
+- ✅ Supports Spanish from https://www.spanishdict.com
+- ✅ Supports Frech from https://www.frenchdictionary.com
+- ✅ Supports a bunch of other langauges from https://www.innovativelanguage.com/word-of-the-day/ (Afrikaans, Arabic, Bulgarian, Cantonese, Chinese, Croatian, Czech, Danish, Dutch, Filipino, Finnish, French, German, Greek, Hebrew, Hindi, Hungarian, Indonesian, Italian, Japanese, Korean, Malaysian, Mongolian, Nepali, Norwegian, Persian, Polish, Portuguese, Romanian, Russian, Serbian, Spanish, Swahili, Swedish, Thai, Turkish, Ukrainian, Urdu, Vietnamese)
 - ✅ Posts to Discord using webhooks (no bot login needed)
 - ✅ Automatically avoids duplicate posts with a history file
 - ✅ `--dry-run` mode for testing
@@ -41,6 +43,7 @@ python3 wotd_post.py --lang french
 | `--lang <language>` | `-l`   | spanish | Language source to use (spanish or french) |
 | `--history-file <PATH>` | `-f`   | `sent_wotd.txt` | File to track previously posted words |
 | `--dry-run` | | *disabled* | Print the embed payload instead of posting |
+| `--debug` | | *disabled* | Additional debug logging |
 
 
 **NOTE**: The script writes to `sent_wotd.txt` in the same directoryto avoid sending duplicate words. The user running the script must have write access to the file (and the directory if the file does not exist to create it). 
