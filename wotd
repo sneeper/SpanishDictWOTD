@@ -190,10 +190,14 @@ def _parse_generic(html: str) -> WOTD:
     trans_el = soup.select_one(
         ".wotd-widget-container-up .wotd-widget-sentence-quizmode-space .big.english"
     )
+    romanization_el = soup.select_one(
+        ".wotd-widget-container-up .wotd-widget-sentence-quizmode-space-text.big.romanization"
+    )
     if not word_el or not trans_el:
         raise RuntimeError("Missing generic widget elements")
     word = word_el.get_text(strip=True)
     translation = trans_el.get_text(strip=True)
+    romanization = romanization_el.get_text(strip=True) if romanization_el else None
     examples = []
     sents = soup.select(
         ".wotd-widget-container-down .wotd-widget-sentence-down-space-text"
@@ -211,7 +215,7 @@ def _parse_generic(html: str) -> WOTD:
             translation=te.get_text(strip=True),
             romanization=(rom_el.get_text(strip=True) if rom_el else None)
         ))
-    return WOTD(word=word, translation=translation, url='', examples=examples)
+    return WOTD(word=word, translation=translation, romanization=romanization, url='', examples=examples)
 
 def _parse_japanese(html: str) -> WOTD:
     soup = BeautifulSoup(html, "html.parser")
@@ -312,6 +316,7 @@ def _parse_chinese(html: str) -> WOTD:
 
 def fetch_wotd_innovative(language: str, wait_secs: int = 10) -> Optional[WOTD]:
     html = _fetch_widget_html(language, wait_secs)
+    logging.debug(html)
     if not html:
         return None
     lang = language.lower()
@@ -331,43 +336,46 @@ def fetch_wotd_innovative(language: str, wait_secs: int = 10) -> Optional[WOTD]:
     w.url = f"https://www.innovativelanguage.com/word-of-the-day/{language}"
     return w
 
-def slack_payload(w: WOTD) -> dict:
-    """Returns a simple Slack message payload."""
-    lines = []
-    title = f"*Word of the Day: <{w.url}|{w.word}>*"
-    if w.pinyin:
-        title += f" ({w.pinyin})"
-    elif w.kana:
-        title += f" ({w.kana} - {w.romaji})"
-    elif w.use_romanization and w.romanization:
-        title += f" ({w.romanization})"
-    lines.append(title)
-    lines.append(f"_Translation:_ {w.translation or '—'}")
-    if w.examples:
-        ex = w.examples[0]
-        ex_lines = [f"> {ex.sentence}"]
-        for attr in ['pinyin', 'kana', 'romanization', 'romaji', 'traditional']:
-            val = getattr(ex, attr)
-            if val:
-                ex_lines.append(f"> {val}")
-        ex_lines.append(f"> {ex.translation}")
-        lines.append("\n".join(ex_lines))
-    return {"text": "\n".join(lines)}
-
-def embed_discord(w: WOTD) -> dict:
-    from discord import Embed
-
+def build_title_word(w: WOTD) -> str:
     title_word = w.word
     if w.pinyin:
         if w.traditional and not (w.traditional == w.word):
-            title_word += f"({w.traditional} - {w.pinyin})"
+            title_word += f" ({w.traditional} - {w.pinyin})"
         else:
             title_word += f" ({w.pinyin})"
     elif w.kana:
         title_word += f" ({w.kana} - {w.romaji})"
     elif w.use_romanization and w.romanization:
         title_word += f" ({w.romanization})"
+    return title_word
 
+def build_example_lines(w: WOTD, ex: Example, bold_char='**', italic_char='*') -> str:
+    key = w.core_word or w.word
+    bold_core = getattr(w, "bold_core_word", False)
+    # Use markup for core word
+    if bold_core:
+        sent = ex.sentence.replace(key, f"{bold_char}{key}{bold_char}")
+    else:
+        sent = ex.sentence
+    trans = ex.translation.replace(w.core_translation or w.translation, f"{bold_char}{w.core_translation or w.translation}{bold_char}")
+    lines = [sent]
+    for attr in ['kana', 'romaji', 'traditional', 'pinyin', 'romanization']:
+        if attr == 'romanization' and not w.use_romanization:
+            continue
+        if attr == 'kana' and (ex.kana == ex.sentence):
+            continue
+        if attr == 'traditional' and (ex.traditional == ex.sentence):
+            continue
+        val = getattr(ex, attr)
+        if val:
+            lines.append(val)
+    lines.append(trans)
+    return "\n".join(lines)
+
+def embed_discord(w: WOTD) -> dict:
+    from discord import Embed
+
+    title_word = build_title_word(w)
     embed = Embed(
         title=f"📖 Word of the Day: {title_word}",
         url=w.url,
@@ -375,26 +383,20 @@ def embed_discord(w: WOTD) -> dict:
     )
     if w.examples:
         ex = w.examples[0]
-        key = w.core_word or w.word
-        if w.bold_core_word:
-            sent = ex.sentence.replace(key, f"**{key}**")
-        else:
-            sent = ex.sentence
-        trans = ex.translation.replace(w.core_translation or w.translation, f"**{w.core_translation or w.translation}**")
-        field = sent + "\n"
-        for attr in ['kana', 'romaji', 'traditional', 'pinyin', 'romanization']:
-            if attr == 'romanization' and not w.use_romanization:
-                continue
-            if attr == 'kana' and (ex.kana == ex.sentence):
-                continue
-            if attr == 'traditional' and (ex.traditional == ex.sentence):
-                continue
-            val = getattr(ex, attr)
-            if val:
-                field += val + "\n"
-        field += trans
+        field = build_example_lines(w, ex, bold_char='**', italic_char='*')
         embed.add_field(name="Example", value=field, inline=False)
     return embed.to_dict()
+
+def slack_payload(w: WOTD) -> dict:
+    lines = []
+    title_word = build_title_word(w)
+    lines.append(f"*Word of the Day: <{w.url}|{title_word}>*")
+    lines.append(f"_Translation:_ {w.translation or '—'}")
+    if w.examples:
+        ex = w.examples[0]
+        ex_lines = build_example_lines(w, ex, bold_char='*', italic_char='_')
+        lines.append("\n".join([f"> {l}" for l in ex_lines.splitlines()]))
+    return {"text": "\n".join(lines)}
 
 def main():
     parser = argparse.ArgumentParser()
