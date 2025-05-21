@@ -331,6 +331,29 @@ def fetch_wotd_innovative(language: str, wait_secs: int = 10) -> Optional[WOTD]:
     w.url = f"https://www.innovativelanguage.com/word-of-the-day/{language}"
     return w
 
+def slack_payload(w: WOTD) -> dict:
+    """Returns a simple Slack message payload."""
+    lines = []
+    title = f"*Word of the Day: <{w.url}|{w.word}>*"
+    if w.pinyin:
+        title += f" ({w.pinyin})"
+    elif w.kana:
+        title += f" ({w.kana} - {w.romaji})"
+    elif w.use_romanization and w.romanization:
+        title += f" ({w.romanization})"
+    lines.append(title)
+    lines.append(f"_Translation:_ {w.translation or '—'}")
+    if w.examples:
+        ex = w.examples[0]
+        ex_lines = [f"> {ex.sentence}"]
+        for attr in ['pinyin', 'kana', 'romanization', 'romaji', 'traditional']:
+            val = getattr(ex, attr)
+            if val:
+                ex_lines.append(f"> {val}")
+        ex_lines.append(f"> {ex.translation}")
+        lines.append("\n".join(ex_lines))
+    return {"text": "\n".join(lines)}
+
 def embed_discord(w: WOTD) -> dict:
     from discord import Embed
 
@@ -378,6 +401,8 @@ def main():
     parser.add_argument("--webhook-url", "-w",
                         default=os.getenv("DISCORD_WEBHOOK"),
                         help="Discord webhook URL or set DISCORD_WEBHOOK env var")
+    parser.add_argument("--slack", action="store_true",
+                        help="Post to Slack instead of Discord (requires Slack webhook URL)")
     parser.add_argument("--lang", "-l", choices=SUPPORTED_LANGUAGES,
                         default='spanish', help="Language for WOTD")
     parser.add_argument("--history-file", "-f", type=Path,
@@ -418,17 +443,23 @@ def main():
         logging.info(f"DRY RUN: {w}")
         return
 
-    if not args.webhook_url.startswith("https://discord.com/api/webhooks/"):
-        logging.warning("Webhook URL may be malformed")
+    if args.slack:
+        if not args.webhook_url.startswith("https://hooks.slack.com/"):
+            logging.warning("Slack webhook URL may be malformed")
+        payload = slack_payload(w)
+    else:
+        if not args.webhook_url.startswith("https://discord.com/api/webhooks/"):
+            logging.warning("Discord webhook URL may be malformed")
+        payload = {"embeds": [embed_discord(w)]}
+
     try:
-        resp = requests.post(args.webhook_url,
-                             json={"embeds": [embed_discord(w)]},
-                             timeout=10)
+        resp = requests.post(args.webhook_url, json=payload, timeout=10)
         resp.raise_for_status()
         logging.info(f"Sent: {sent_key}")
         save_word(sent_key, history_file)
     except Exception as e:
         logging.error(f"Error posting: {e}")
+
 
 if __name__ == '__main__':
     os.environ['SSL_CERT_FILE'] = certifi.where()
